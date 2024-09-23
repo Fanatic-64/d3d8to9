@@ -56,10 +56,10 @@ ULONG STDMETHODCALLTYPE Direct3DDevice8::Release()
 
 	// Shaders are destroyed alongside the device that created them in D3D8 but not in D3D9
 	// so we Release all the shaders when the device releases to mirror that behaviour
-	if (LastRefCount !=0 && LastRefCount == (VertexShaderAndDeclarationCount + PixelShaderHandles.size()))
+	if (LastRefCount != 0 && LastRefCount == (VertexShaderAndDeclarationCount + PixelShaderHandles.size() + StateBlockTokens.size()))
 	{
 		ProxyInterface->AddRef();
-		ReleaseShaders();
+		ReleaseShadersAndStateBlocks();
 		LastRefCount = ProxyInterface->Release();
 		assert(LastRefCount == 0);
 	}
@@ -414,14 +414,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateImageSurface(UINT Width, UINT H
 
 	*ppSurface = nullptr;
 
-	if (Format == D3DFMT_R8G8B8)
-	{
-#ifndef D3D8TO9NOLOG
-		LOG << "> Replacing format 'D3DFMT_R8G8B8' with 'D3DFMT_X8R8G8B8' ..." << std::endl;
-#endif
-		Format = D3DFMT_X8R8G8B8;
-	}
-
 	IDirect3DSurface9 *SurfaceInterface = nullptr;
 
 	const HRESULT hr = ProxyInterface->CreateOffscreenPlainSurface(Width, Height, Format, D3DPOOL_SYSTEMMEM, &SurfaceInterface, nullptr);
@@ -652,7 +644,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetViewport(const D3DVIEWPORT8 *pView
 	{
 		D3DSURFACE_DESC Desc;
 
-		if (SUCCEEDED(pCurrentRenderTarget->GetDesc(&Desc)) && (pViewport->Height > Desc.Height || pViewport->Width > Desc.Width))
+		if (SUCCEEDED(pCurrentRenderTarget->GetDesc(&Desc)) && (pViewport->Y + pViewport->Height > Desc.Height || pViewport->X + pViewport->Width > Desc.Width))
 			return D3DERR_INVALIDCALL;
 	}
 
@@ -725,7 +717,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetRenderState(D3DRENDERSTATETYPE Sta
 	switch (static_cast<DWORD>(State))
 	{
 	case D3DRS_ZVISIBLE:
-		return D3DERR_INVALIDCALL;
 	case D3DRS_PATCHSEGMENTS:
 	case D3DRS_LINEPATTERN:
 	case D3DRS_SOFTWAREVERTEXPROCESSING:
@@ -756,7 +747,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::GetRenderState(D3DRENDERSTATETYPE Sta
 	switch (static_cast<DWORD>(State))
 	{
 	case D3DRS_ZVISIBLE:
-		return D3DERR_INVALIDCALL;
 	case D3DRS_LINEPATTERN:
 		*pValue = 0;
 		return D3D_OK;
@@ -785,7 +775,12 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::EndStateBlock(DWORD *pToken)
 	if (pToken == nullptr)
 		return D3DERR_INVALIDCALL;
 
-	return ProxyInterface->EndStateBlock(reinterpret_cast<IDirect3DStateBlock9 **>(pToken));
+	HRESULT hr = ProxyInterface->EndStateBlock(reinterpret_cast<IDirect3DStateBlock9 **>(pToken));
+
+	if (SUCCEEDED(hr))
+		StateBlockTokens.insert(*pToken);
+
+	return hr;
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::ApplyStateBlock(DWORD Token)
 {
@@ -808,6 +803,8 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::DeleteStateBlock(DWORD Token)
 
 	reinterpret_cast<IDirect3DStateBlock9 *>(Token)->Release();
 
+	StateBlockTokens.erase(Token);
+
 	return D3D_OK;
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateStateBlock(D3DSTATEBLOCKTYPE Type, DWORD *pToken)
@@ -819,7 +816,12 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateStateBlock(D3DSTATEBLOCKTYPE Ty
 	if (pToken == nullptr)
 		return D3DERR_INVALIDCALL;
 
-	return ProxyInterface->CreateStateBlock(Type, reinterpret_cast<IDirect3DStateBlock9 **>(pToken));
+	HRESULT hr = ProxyInterface->CreateStateBlock(Type, reinterpret_cast<IDirect3DStateBlock9 **>(pToken));
+
+	if (SUCCEEDED(hr))
+		StateBlockTokens.insert(*pToken);
+
+	return hr;
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetClipStatus(const D3DCLIPSTATUS8 *pClipStatus)
 {
@@ -853,16 +855,20 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::GetTexture(DWORD Stage, IDirect3DBase
 		case D3DRTYPE_TEXTURE:
 			BaseTextureInterface->QueryInterface(IID_PPV_ARGS(&TextureInterface));
 			*ppTexture = ProxyAddressLookupTable->FindAddress<Direct3DTexture8>(TextureInterface);
+			BaseTextureInterface->Release();
 			break;
 		case D3DRTYPE_VOLUMETEXTURE:
 			BaseTextureInterface->QueryInterface(IID_PPV_ARGS(&VolumeTextureInterface));
 			*ppTexture = ProxyAddressLookupTable->FindAddress<Direct3DVolumeTexture8>(VolumeTextureInterface);
+			BaseTextureInterface->Release();
 			break;
 		case D3DRTYPE_CUBETEXTURE:
 			BaseTextureInterface->QueryInterface(IID_PPV_ARGS(&CubeTextureInterface));
 			*ppTexture = ProxyAddressLookupTable->FindAddress<Direct3DCubeTexture8>(CubeTextureInterface);
+			BaseTextureInterface->Release();
 			break;
 		default:
+			BaseTextureInterface->Release();
 			return D3DERR_INVALIDCALL;
 		}
 	}
@@ -2183,7 +2189,7 @@ void Direct3DDevice8::ApplyClipPlanes()
 	}
 }
 
-void Direct3DDevice8::ReleaseShaders()
+void Direct3DDevice8::ReleaseShadersAndStateBlocks()
 {
 	for (auto Handle : PixelShaderHandles)
 	{
@@ -2196,4 +2202,9 @@ void Direct3DDevice8::ReleaseShaders()
 	}
 	VertexShaderHandles.clear();
 	VertexShaderAndDeclarationCount = 0;
+	for (auto Token : StateBlockTokens)
+	{
+		DeleteStateBlock(Token);
+	}
+	StateBlockTokens.clear();
 }
