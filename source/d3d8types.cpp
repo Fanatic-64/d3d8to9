@@ -140,10 +140,16 @@ void ConvertPresentParameters(D3DPRESENT_PARAMETERS8 &Input, D3DPRESENT_PARAMETE
 	Output.AutoDepthStencilFormat = Input.AutoDepthStencilFormat;
 	Output.Flags = Input.Flags;
 
-	// MultiSampleType must be D3DMULTISAMPLE_NONE unless SwapEffect has been set to D3DSWAPEFFECT_DISCARD or if there is a lockable backbuffer
-	if (Input.SwapEffect != D3DSWAPEFFECT_DISCARD || (Input.Flags & D3DPRESENTFLAG_LOCKABLE_BACKBUFFER))
+	// MultiSampleType must be D3DMULTISAMPLE_NONE unless SwapEffect has been set to D3DSWAPEFFECT_DISCARD
+	if (Input.SwapEffect != D3DSWAPEFFECT_DISCARD)
 	{
 		Output.MultiSampleType = D3DMULTISAMPLE_NONE;
+	}
+
+	// Remove Flags that are not compatible with multisampling
+	if (Output.MultiSampleType != D3DMULTISAMPLE_NONE)
+	{
+		Output.Flags &= ~D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
 	}
 
 	if (Input.Windowed)
